@@ -33,7 +33,7 @@ import { cn, formatCurrency, formatPercentage } from './lib/utils';
 import { Trade, AccountSettings, DashboardStats, TradeResult, TradeType } from './types';
 import { AuthProvider, useAuth } from './AuthContext';
 import { AuthScreen } from './Auth';
-import { supabase } from './lib/supabase';
+import { supabase, isSupabaseOnline, subscribeToStatusChange } from './lib/supabase';
 
 // --- Components ---
 
@@ -82,6 +82,13 @@ function TradeFlowApp() {
   // State
   const [trades, setTrades] = useState<Trade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(true);
+  const [online, setOnline] = useState(isSupabaseOnline());
+
+  useEffect(() => {
+    return subscribeToStatusChange((status) => {
+      setOnline(status);
+    });
+  }, []);
 
   const [filter, setFilter] = useState<TradeResult | 'All'>('All');
   const [dateRange, setDateRange] = useState<'All' | 'Today' | 'Week' | 'Month'>('All');
@@ -99,49 +106,65 @@ function TradeFlowApp() {
     }
 
     const fetchTrades = async () => {
-      const { data, error } = await supabase
-        .from('trades')
-        .select('*')
-        .eq('userId', user.id)
-        .order('timestamp', { ascending: false });
+      try {
+        const { data, error } = await supabase
+          .from('trades')
+          .select('*')
+          .eq('userId', user.id)
+          .order('timestamp', { ascending: false });
 
-      if (error) {
-        console.error("Supabase Error: ", error);
-      } else {
-        setTrades(data as Trade[]);
+        if (error) {
+          console.error("Supabase Error: ", error);
+        } else {
+          setTrades(data as Trade[]);
+        }
+      } catch (err) {
+        console.error("Exception in fetchTrades:", err);
+      } finally {
+        setTradesLoading(false);
       }
-      setTradesLoading(false);
     };
 
     fetchTrades();
 
-    const channel = supabase
-      .channel(`trades-changes-${user.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'trades',
-          filter: `userId=eq.${user.id}`,
-        },
-        (payload) => {
-          if (payload.eventType === 'INSERT') {
-            setTrades(prev => {
-              if (prev.some(t => t.id === payload.new.id)) return prev;
-              return [payload.new as Trade, ...prev].sort((a,b) => b.timestamp - a.timestamp);
-            });
-          } else if (payload.eventType === 'DELETE') {
-            setTrades(prev => prev.filter(t => t.id !== payload.old.id));
-          } else if (payload.eventType === 'UPDATE') {
-            setTrades(prev => prev.map(t => t.id === payload.new.id ? payload.new as Trade : t).sort((a,b) => b.timestamp - a.timestamp));
+    let channel: any;
+    try {
+      channel = supabase
+        .channel(`trades-changes-${user.id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'trades',
+            filter: `userId=eq.${user.id}`,
+          },
+          (payload) => {
+            if (payload.eventType === 'INSERT') {
+              setTrades(prev => {
+                if (prev.some(t => t.id === payload.new.id)) return prev;
+                return [payload.new as Trade, ...prev].sort((a,b) => b.timestamp - a.timestamp);
+              });
+            } else if (payload.eventType === 'DELETE') {
+              setTrades(prev => prev.filter(t => t.id !== payload.old.id));
+            } else if (payload.eventType === 'UPDATE') {
+              setTrades(prev => prev.map(t => t.id === payload.new.id ? payload.new as Trade : t).sort((a,b) => b.timestamp - a.timestamp));
+            }
           }
-        }
-      )
-      .subscribe();
+        )
+        .subscribe();
+    } catch (err) {
+      console.error("Exception in trades channel subscription:", err);
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      if (channel) {
+        try {
+          supabase.removeChannel(channel);
+        } catch (e) {
+          console.error("Error removing trades channel:", e);
+        }
+      }
     };
   }, [user]);
 
@@ -314,10 +337,19 @@ function TradeFlowApp() {
       </nav>
 
       <main className="max-w-5xl mx-auto px-6 pt-12 pb-32">
-        <header className="mb-12 flex justify-between items-end">
+        <header className="mb-12 flex justify-between items-end flex-wrap gap-4">
           <div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <h1 className="text-3xl font-bold tracking-tight">{accountSettings?.name || user.user_metadata?.name || 'Minha Conta'}</h1>
+              <span className={cn(
+                "text-[10px] font-black uppercase px-2.5 py-1 rounded-full border flex items-center gap-1.5 shadow-sm",
+                online 
+                  ? "bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border-emerald-200/60 dark:border-emerald-900/50"
+                  : "bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400 border-amber-200/60 dark:border-amber-900/50"
+              )}>
+                <span className={cn("w-1.5 h-1.5 rounded-full", online ? "bg-emerald-500 animate-pulse" : "bg-amber-500")} />
+                {online ? 'Online (Supabase)' : 'Offline (Local)'}
+              </span>
               <div className="flex gap-2">
                 <button 
                   onClick={() => setDarkMode(!darkMode)}

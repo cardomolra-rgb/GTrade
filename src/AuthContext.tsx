@@ -19,10 +19,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [accountSettings, setAccountSettingsState] = useState<AccountSettings | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      if (!session?.user) setLoading(false);
-    });
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => {
+        setUser(session?.user ?? null);
+        if (!session?.user) setLoading(false);
+      })
+      .catch((err) => {
+        console.error("Auth getSession error on mount:", err);
+        setLoading(false);
+      });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (_event, session) => {
@@ -41,40 +46,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const fetchSettings = async () => {
-      const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('uid', user.id)
-        .single();
-        
-      if (!error && data) {
-        setAccountSettingsState(data as unknown as AccountSettings);
+      try {
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('uid', user.id)
+          .single();
+          
+        if (!error && data) {
+          setAccountSettingsState(data as unknown as AccountSettings);
+        }
+      } catch (err) {
+        console.error("Error fetching settings:", err);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
     
     fetchSettings();
 
-    const channel = supabase
-      .channel(`users-changes-${user.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'users',
-          filter: `uid=eq.${user.id}`,
-        },
-        (payload) => {
-          if (payload.new) {
-             setAccountSettingsState(payload.new as unknown as AccountSettings);
+    let channel: any;
+    try {
+      channel = supabase
+        .channel(`users-changes-${user.id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'users',
+            filter: `uid=eq.${user.id}`,
+          },
+          (payload) => {
+            if (payload.new) {
+               setAccountSettingsState(payload.new as unknown as AccountSettings);
+            }
           }
-        }
-      )
-      .subscribe();
+        )
+        .subscribe();
+    } catch (err) {
+      console.error("Error subscribing to users channel:", err);
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      if (channel) {
+        try {
+          supabase.removeChannel(channel);
+        } catch (err) {
+          console.error("Error removing users channel:", err);
+        }
+      }
     };
   }, [user]);
 
@@ -84,16 +105,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Atualiza a tela instantaneamente (Optimistic Update)
     setAccountSettingsState(settings);
 
-    const { error } = await supabase.from('users').upsert({
-      uid: user.id,
-      ...settings,
-      updatedAt: new Date().toISOString()
-    });
-    if (error) console.error("Error setting account:", error);
+    try {
+      const { error } = await supabase.from('users').upsert({
+        uid: user.id,
+        ...settings,
+        updatedAt: new Date().toISOString()
+      });
+      if (error) console.error("Error setting account:", error);
+    } catch (err) {
+      console.error("Exception in setAccountSettings:", err);
+    }
   };
 
   const signOut = async () => {
-     await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.error("Error signing out:", err);
+    }
   };
 
   return (
